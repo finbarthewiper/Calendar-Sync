@@ -4,13 +4,13 @@ A Clarity smart contract for managing and synchronizing calendar events on the S
 
 ## Overview
 
-This smart contract enables users to create, manage, and share calendar events on the blockchain. It provides features such as event creation, modification, deletion, and sharing capabilities with proper access controls. The contract ensures data integrity by preventing scheduling conflicts and maintaining proper authorization checks.
+This smart contract enables users to create, manage, and share calendar events on the blockchain. It provides features such as event creation, modification, deletion, and sharing capabilities with proper access controls. The contract ensures data integrity by validating inputs and maintaining proper authorization checks.
 
 ## Features
 
 - **Event Management**: Create, update, and delete calendar events
 - **Access Control**: Public/private events with granular sharing permissions
-- **Conflict Detection**: Prevents double-booking by checking for time overlaps
+- **Input Validation**: Ensures proper data formats and time sequencing
 - **Blockchain Timestamps**: Uses blockchain timestamps for reliable time tracking
 - **User-friendly IDs**: Auto-increments event IDs for easy reference
 
@@ -38,19 +38,13 @@ This smart contract enables users to create, manage, and share calendar events o
   ```
   - Returns: `(ok true)` on success, or an error code
 
-#### Calendar Sharing
+#### Sharing Management
 
-- **grant-calendar-access**: Share your calendar with another user
+- **share-event**: Share a specific event with another user with granular permissions
   ```clarity
-  (grant-calendar-access accessor can-read can-write)
+  (share-event event-id recipient can-view can-edit can-delete)
   ```
-  - Returns: `(ok true)` on success
-
-- **revoke-calendar-access**: Remove sharing permissions
-  ```clarity
-  (revoke-calendar-access accessor)
-  ```
-  - Returns: `(ok true)` on success
+  - Returns: `(ok true)` on success, or an error code
 
 ### Read-Only Functions
 
@@ -60,25 +54,24 @@ This smart contract enables users to create, manage, and share calendar events o
   ```
   - Returns: `(ok {event-data})` on success, or an error code
 
-- **get-user-events**: List all events for a user
+- **get-user-event-count**: Get the number of events owned by a user
   ```clarity
-  (get-user-events user)
+  (get-user-event-count user)
   ```
-  - Returns: `(ok [event-ids])` filtered by access permissions
+  - Returns: `(ok {count: uint})` with the event count
 
-- **check-calendar-access**: Check sharing permissions
+- **get-event-permission**: Check sharing permissions for a specific event
   ```clarity
-  (check-calendar-access owner accessor)
+  (get-event-permission event-id user)
   ```
-  - Returns: `(ok {access-data})` with read/write permission flags
+  - Returns: `(ok {permission-data})` with view/edit/delete permission flags
 
 ## Error Codes
 
 - `ERR-NOT-AUTHORIZED (u100)`: User doesn't have permission for this operation
 - `ERR-EVENT-NOT-FOUND (u101)`: The specified event doesn't exist
 - `ERR-INVALID-TIME (u102)`: Invalid time parameters (end must be after start)
-- `ERR-EVENT-OVERLAP (u103)`: Event conflicts with an existing event
-- `ERR-INVALID-EVENT-ID (u104)`: The event ID is not valid
+- `ERR-INVALID-INPUT (u103)`: Invalid input parameters (empty strings, etc.)
 
 ## Data Structures
 
@@ -97,12 +90,13 @@ This smart contract enables users to create, manage, and share calendar events o
 }
 ```
 
-### Access Permission
+### Event Permission
 
 ```clarity
 {
-  can-read: bool,
-  can-write: bool
+  can-view: bool,
+  can-edit: bool,
+  can-delete: bool
 }
 ```
 
@@ -120,25 +114,38 @@ This smart contract enables users to create, manage, and share calendar events o
   false)
 ```
 
-### Sharing Calendar with Another User
+### Sharing an Event with Another User
 
 ```clarity
-;; Give read-only access
-(contract-call? .calendar-sync grant-calendar-access 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM true false)
+;; Give view-only access
+(contract-call? .calendar-sync share-event 
+  u1
+  'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM 
+  true false false)
 
-;; Give read and write access
-(contract-call? .calendar-sync grant-calendar-access 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM true true)
+;; Give full access
+(contract-call? .calendar-sync share-event
+  u1
+  'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+  true true true)
 ```
 
-### Getting User's Events
+### Getting Event Details
 
 ```clarity
-(contract-call? .calendar-sync get-user-events 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM)
+(contract-call? .calendar-sync get-event u1)
+```
+
+### Checking Event Permissions
+
+```clarity
+(contract-call? .calendar-sync get-event-permission u1 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM)
 ```
 
 ## Security Considerations
 
 - All event modifications require proper authorization
 - Time values are validated to ensure integrity
-- Conflict detection prevents double-booking
-- Public/private event settings control visibility
+- String inputs are validated to ensure they're not empty
+- Fine-grained permissions model for access control
+- Events track last modification time for audit purposes
