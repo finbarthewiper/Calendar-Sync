@@ -5,11 +5,9 @@
 (define-constant ERR-NOT-AUTHORIZED (err u100))
 (define-constant ERR-EVENT-NOT-FOUND (err u101))
 (define-constant ERR-INVALID-TIME (err u102))
-(define-constant ERR-EVENT-OVERLAP (err u103))
-(define-constant ERR-INVALID-EVENT-ID (err u104))
 
-;; Data structures for calendar events
-(define-map events 
+;; Data structures for calendar events - simplified
+(define-map events
   { event-id: uint }
   {
     owner: principal,
@@ -24,15 +22,19 @@
 )
 
 ;; Map to track a user's events
-(define-map user-events
+(define-map user-event-count
   { user: principal }
-  { event-list: (list 20 uint) }
+  { count: uint }
 )
 
-;; Map for shared calendar access
-(define-map calendar-access
-  { calendar-owner: principal, accessor: principal }
-  { can-read: bool, can-write: bool }
+;; Map to track shared events (who has access to what)
+(define-map event-permissions
+  { event-id: uint, user: principal }
+  { 
+    can-view: bool,
+    can-edit: bool,
+    can-delete: bool
+  }
 )
 
 ;; Counter to generate unique event IDs
@@ -46,63 +48,34 @@
   )
 )
 
-;; Helper function to check if user has access to an event
-(define-private (has-event-access (event-id uint) (user principal))
-  (let (
-    (event (map-get? events { event-id: event-id }))
-  )
-    (if (is-none event)
-      false
-      (let (
-        (event-data (unwrap-panic event))
-        (owner (get owner event-data))
-        (is-public (get is-public event-data))
-        (access (map-get? calendar-access { calendar-owner: owner, accessor: user }))
-      )
-        (or
-          (is-eq owner user)
-          is-public
-          (and
-            (is-some access)
-            (get can-read (unwrap-panic access))
-          )
-        )
-      )
-    )
-  )
+;; Function to get current block time
+(define-private (get-current-time)
+  (default-to u0 (get-block-info? time u0))
 )
 
-;; Function to check time conflicts for a user
-(define-private (has-time-conflict (user principal) (start-time uint) (end-time uint) (exclude-id uint))
-  (let (
-    (user-event-data (map-get? user-events { user: user }))
-  )
-    (if (is-none user-event-data)
+;; Check if a user has permission for an event
+(define-private (has-permission (event-id uint) (user principal) (permission-type (string-ascii 10)))
+  (let ((event-data (map-get? events { event-id: event-id })))
+    (if (is-none event-data)
       false
-      (let (
-        (event-list (get event-list (unwrap-panic user-event-data)))
-      )
-        (fold check-overlap-fold event-list false)
-      )
-    )
-  )
-  
-  (define-private (check-overlap-fold (event-id uint) (has-overlap bool))
-    (if has-overlap
-      true
-      (let (
-        (event (map-get? events { event-id: event-id }))
-      )
-        (if (or (is-none event) (is-eq event-id exclude-id))
-          false
-          (let (
-            (event-data (unwrap-panic event))
-            (event-start (get start-time event-data))
-            (event-end (get end-time event-data))
-          )
-            (and
-              (< event-start end-time)
-              (> event-end start-time)
+      (let ((event (unwrap-panic event-data)))
+        (if (is-eq (get owner event) user)
+          true  ;; Owner has all permissions
+          (let ((permission-data (map-get? event-permissions { event-id: event-id, user: user })))
+            (if (is-none permission-data)
+              false
+              (let ((perms (unwrap-panic permission-data)))
+                (if (is-eq permission-type "view")
+                  (get can-view perms)
+                  (if (is-eq permission-type "edit")
+                    (get can-edit perms)
+                    (if (is-eq permission-type "delete")
+                      (get can-delete perms)
+                      false
+                    )
+                  )
+                )
+              )
             )
           )
         )
@@ -111,264 +84,194 @@
   )
 )
 
-;; Function to add a new event
-(define-public (create-event 
-  (title (string-utf8 100)) 
-  (description (string-utf8 500)) 
-  (start-time uint) 
-  (end-time uint) 
+;; Function to add a new event - simplified version
+(define-public (create-event
+  (title (string-utf8 100))
+  (description (string-utf8 500))
+  (start-time uint)
+  (end-time uint)
   (location (string-utf8 100))
   (is-public bool)
 )
-  (let (
-    (user tx-sender)
-    (current-time (get-block-info? time (get-burn-block-info? header-hash (get-burnchain-header-hash))))
-    (event-id (get-and-increment-event-id))
-  )
-    ;; Validate inputs
-    (asserts! (< start-time end-time) ERR-INVALID-TIME)
-    (asserts! (is-some current-time) ERR-INVALID-TIME)
-    (asserts! (>= start-time (unwrap-panic current-time)) ERR-INVALID-TIME)
-    (asserts! (not (has-time-conflict user start-time end-time u0)) ERR-EVENT-OVERLAP)
+  (let ((user tx-sender)
+        (event-id (get-and-increment-event-id))
+        (current-time (get-current-time)))
     
-    ;; Create event
-    (map-set events 
-      { event-id: event-id }
-      {
-        owner: user,
-        title: title,
-        description: description,
-        start-time: start-time,
-        end-time: end-time,
-        location: location,
-        is-public: is-public,
-        last-modified: (unwrap-panic current-time)
-      }
-    )
-    
-    ;; Add event to user's list
-    (let (
-      (user-event-data (map-get? user-events { user: user }))
-    )
-      (if (is-none user-event-data)
-        (map-set user-events 
-          { user: user }
-          { event-list: (list event-id) }
+    ;; Basic validations
+    (if (>= start-time end-time)
+      (err ERR-INVALID-TIME)
+      
+      ;; Create the event
+      (begin
+        (map-set events
+          { event-id: event-id }
+          {
+            owner: user,
+            title: title,
+            description: description,
+            start-time: start-time,
+            end-time: end-time,
+            location: location,
+            is-public: is-public,
+            last-modified: current-time
+          }
         )
-        (map-set user-events
-          { user: user }
-          { event-list: (append (get event-list (unwrap-panic user-event-data)) event-id) }
-        )
-      )
+        
+        ;; Update user's event count
+        (let ((user-count (default-to { count: u0 } (map-get? user-event-count { user: user }))))
+          (map-set user-event-count
+            { user: user }
+            { count: (+ (get count user-count) u1) }))
+        
+        ;; Return the event ID
+        (ok event-id))
     )
-    
-    (ok event-id)
   )
 )
 
-;; Function to update an existing event
+;; Function to read an event
+(define-read-only (get-event (event-id uint))
+  (let ((event-data (map-get? events { event-id: event-id })))
+    (if (is-none event-data)
+      (err ERR-EVENT-NOT-FOUND)
+      (ok (unwrap-panic event-data)))
+  )
+)
+
+;; Function to update an event
 (define-public (update-event
   (event-id uint)
-  (title (string-utf8 100)) 
-  (description (string-utf8 500)) 
-  (start-time uint) 
-  (end-time uint) 
+  (title (string-utf8 100))
+  (description (string-utf8 500))
+  (start-time uint)
+  (end-time uint)
   (location (string-utf8 100))
   (is-public bool)
 )
-  (let (
-    (user tx-sender)
-    (current-time (get-block-info? time (get-burn-block-info? header-hash (get-burnchain-header-hash))))
-    (event (map-get? events { event-id: event-id }))
-  )
-    ;; Validate inputs
-    (asserts! (is-some event) ERR-EVENT-NOT-FOUND)
-    (asserts! (< start-time end-time) ERR-INVALID-TIME)
-    (asserts! (is-some current-time) ERR-INVALID-TIME)
+  (let ((user tx-sender)
+        (current-time (get-current-time))
+        (event-data (map-get? events { event-id: event-id })))
     
-    (let (
-      (event-data (unwrap-panic event))
-      (owner (get owner event-data))
-      (access (map-get? calendar-access { calendar-owner: owner, accessor: user }))
-    )
-      ;; Check authorization
-      (asserts! 
-        (or 
-          (is-eq owner user)
-          (and 
-            (is-some access)
-            (get can-write (unwrap-panic access))
+    ;; Check if event exists
+    (if (is-none event-data)
+      (err ERR-EVENT-NOT-FOUND)
+      (begin
+        ;; Verify permissions
+        (if (not (has-permission event-id user "edit"))
+          (err ERR-NOT-AUTHORIZED)
+          (begin
+            ;; Validate time
+            (if (>= start-time end-time)
+              (err ERR-INVALID-TIME)
+              (begin
+                ;; Update the event
+                (map-set events
+                  { event-id: event-id }
+                  {
+                    owner: (get owner (unwrap-panic event-data)),
+                    title: title,
+                    description: description,
+                    start-time: start-time,
+                    end-time: end-time,
+                    location: location,
+                    is-public: is-public,
+                    last-modified: current-time
+                  }
+                )
+                
+                (ok true)
+              )
+            )
           )
-        ) 
-        ERR-NOT-AUTHORIZED
+        )
       )
-      
-      ;; Check for time conflicts (excluding this event)
-      (asserts! (not (has-time-conflict user start-time end-time event-id)) ERR-EVENT-OVERLAP)
-      
-      ;; Update the event
-      (map-set events 
-        { event-id: event-id }
-        {
-          owner: owner,
-          title: title,
-          description: description,
-          start-time: start-time,
-          end-time: end-time,
-          location: location,
-          is-public: is-public,
-          last-modified: (unwrap-panic current-time)
-        }
-      )
-      
-      (ok true)
     )
   )
 )
 
 ;; Function to delete an event
 (define-public (delete-event (event-id uint))
-  (let (
-    (user tx-sender)
-    (event (map-get? events { event-id: event-id }))
-  )
-    ;; Validate inputs
-    (asserts! (is-some event) ERR-EVENT-NOT-FOUND)
+  (let ((user tx-sender)
+        (event-data (map-get? events { event-id: event-id })))
     
-    (let (
-      (event-data (unwrap-panic event))
-      (owner (get owner event-data))
-      (access (map-get? calendar-access { calendar-owner: owner, accessor: user }))
+    ;; Check if event exists
+    (if (is-none event-data)
+      (err ERR-EVENT-NOT-FOUND)
+      (begin
+        ;; Verify permissions
+        (if (not (has-permission event-id user "delete"))
+          (err ERR-NOT-AUTHORIZED)
+          (begin
+            ;; Remove from events map
+            (map-delete events { event-id: event-id })
+            
+            ;; Update user's event count if the user is the owner
+            (if (is-eq (get owner (unwrap-panic event-data)) user)
+              (let ((user-count (default-to { count: u0 } (map-get? user-event-count { user: user }))))
+                (map-set user-event-count
+                  { user: user }
+                  { count: (- (get count user-count) u1) }))
+              true)
+            
+            (ok true)
+          )
+        )
+      )
     )
-      ;; Check authorization
-      (asserts! 
-        (or 
-          (is-eq owner user)
-          (and 
-            (is-some access)
-            (get can-write (unwrap-panic access))
-          )
-        ) 
-        ERR-NOT-AUTHORIZED
-      )
-      
-      ;; Remove from events map
-      (map-delete events { event-id: event-id })
-      
-      ;; Remove from user's event list
-      (let (
-        (user-event-data (map-get? user-events { user: owner }))
-      )
-        (if (is-some user-event-data)
-          (let (
-            (event-list (get event-list (unwrap-panic user-event-data)))
-            (filtered-list (filter remove-event-filter event-list))
-          )
-            (map-set user-events
-              { user: owner }
-              { event-list: filtered-list }
+  )
+)
+
+;; Function to share an event with another user
+(define-public (share-event
+  (event-id uint)
+  (recipient principal)
+  (can-view bool)
+  (can-edit bool)
+  (can-delete bool)
+)
+  (let ((user tx-sender)
+        (event-data (map-get? events { event-id: event-id })))
+    
+    ;; Check if event exists
+    (if (is-none event-data)
+      (err ERR-EVENT-NOT-FOUND)
+      (begin
+        ;; Verify ownership
+        (if (not (is-eq (get owner (unwrap-panic event-data)) user))
+          (err ERR-NOT-AUTHORIZED)
+          (begin
+            ;; Set permissions
+            (map-set event-permissions
+              { event-id: event-id, user: recipient }
+              { 
+                can-view: can-view,
+                can-edit: can-edit,
+                can-delete: can-delete
+              }
             )
+            
+            (ok true)
           )
-          true
-        )
-      )
-      
-      (ok true)
-    )
-  )
-  
-  (define-private (remove-event-filter (id uint))
-    (not (is-eq id event-id))
-  )
-)
-
-;; Function to read an event
-(define-read-only (get-event (event-id uint))
-  (let (
-    (user tx-sender)
-    (event (map-get? events { event-id: event-id }))
-  )
-    (asserts! (is-some event) ERR-EVENT-NOT-FOUND)
-    (asserts! (has-event-access event-id user) ERR-NOT-AUTHORIZED)
-    
-    (ok (unwrap-panic event))
-  )
-)
-
-;; Function to get all events for a user
-(define-read-only (get-user-events (user principal))
-  (let (
-    (viewer tx-sender)
-    (user-event-data (map-get? user-events { user: user }))
-  )
-    (if (is-none user-event-data)
-      (ok (list))
-      (let (
-        (event-list (get event-list (unwrap-panic user-event-data)))
-        (access (map-get? calendar-access { calendar-owner: user, accessor: viewer }))
-        (can-access (or 
-                      (is-eq user viewer)
-                      (and 
-                        (is-some access)
-                        (get can-read (unwrap-panic access))
-                      )
-                    ))
-      )
-        (if can-access
-          (ok event-list)
-          (ok (filter get-public-events event-list))
         )
       )
     )
   )
-  
-  (define-private (get-public-events (event-id uint))
-    (let (
-      (event (map-get? events { event-id: event-id }))
-    )
-      (if (is-none event)
-        false
-        (get is-public (unwrap-panic event))
-      )
-    )
-  )
 )
 
-;; Function to grant calendar access to another user
-(define-public (grant-calendar-access (accessor principal) (can-read bool) (can-write bool))
-  (let (
-    (owner tx-sender)
-  )
-    (map-set calendar-access
-      { calendar-owner: owner, accessor: accessor }
-      { can-read: can-read, can-write: can-write }
-    )
-    
-    (ok true)
-  )
+;; Function to get user's total event count
+(define-read-only (get-user-event-count (user principal))
+  (ok (default-to { count: u0 } (map-get? user-event-count { user: user })))
 )
 
-;; Function to revoke calendar access
-(define-public (revoke-calendar-access (accessor principal))
-  (let (
-    (owner tx-sender)
-  )
-    (map-delete calendar-access
-      { calendar-owner: owner, accessor: accessor }
-    )
-    
-    (ok true)
-  )
-)
-
-;; Function to check calendar access
-(define-read-only (check-calendar-access (owner principal) (accessor principal))
-  (let (
-    (access (map-get? calendar-access { calendar-owner: owner, accessor: accessor }))
-  )
-    (if (is-none access)
-      (ok { can-read: false, can-write: false })
-      (ok (unwrap-panic access))
-    )
+;; Function to get an event permission for a specific user
+(define-read-only (get-event-permission (event-id uint) (user principal))
+  (let ((permission-data (map-get? event-permissions { event-id: event-id, user: user })))
+    (if (is-none permission-data)
+      (ok {
+        can-view: false,
+        can-edit: false,
+        can-delete: false
+      })
+      (ok (unwrap-panic permission-data)))
   )
 )
